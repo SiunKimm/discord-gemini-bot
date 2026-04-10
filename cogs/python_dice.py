@@ -8,7 +8,7 @@ class DiceCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="주사위", description="운이 있없다")
+    @app_commands.command(name="주사위", description="운을 시험해 보세요")
     async def roll_dice(self, interaction: discord.Interaction):
         num = random.randint(1, 6)
-        await interaction.response.send_message(f"주사위 결과: {num}")
+        await interaction.response.send_message(f"주사위 결과는 {num}입니다.")

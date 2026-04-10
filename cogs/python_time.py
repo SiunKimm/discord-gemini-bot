@@ -13,5 +13,4 @@ class TimeCog(commands.Cog):
     async def get_time(self, interaction: discord.Interaction):
         now = datetime.now(ZoneInfo("Asia/Seoul"))
         formatted_time = now.strftime("%p %I시 %M분").replace("AM", "오전").replace("PM", "오후")
-        await interaction.response.send_message(f"지금은 {formatted_time} 일려나...?")
-        
+        await interaction.response.send_message(f"지금은 {formatted_time}입니다.")

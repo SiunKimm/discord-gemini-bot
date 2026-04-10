@@ -3,6 +3,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from utils.gemini_wrapper import ask_gemini_question
+from utils.text_utils import chunk_text
 
 class GeminiCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -12,4 +13,5 @@ class GeminiCog(commands.Cog):
     async def ask_gemini(self, interaction: discord.Interaction, question: str):
         await interaction.response.send_message(f"'{question}' 에 대해 생각 중... 잠시만 기다려줘!", ephemeral=True)
         response_text = await ask_gemini_question(question)
-        await interaction.followup.send(response_text[:1900])
+        for chunk in chunk_text(response_text):
+            await interaction.followup.send(chunk)

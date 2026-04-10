@@ -1,10 +1,20 @@
 import discord
+import logging
 from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta, timezone
+from typing import List
+
+from config.settings import ANALYSIS_DEFAULT_DAYS, ANALYSIS_MAX_DAYS
 from utils.gemini_wrapper import ask_gemini_question
+from utils.text_utils import chunk_text
+
+logger = logging.getLogger(__name__)
+
 
 class UserAnalysisCog(commands.Cog):
+    MAX_MESSAGE_CHUNK = 1900
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
@@ -22,56 +32,100 @@ class UserAnalysisCog(commands.Cog):
         interaction: discord.Interaction,
         user: discord.User,
         channel: discord.TextChannel,
-        days: int = 7
+        days: int = ANALYSIS_DEFAULT_DAYS,
     ):
-        # 봇 자기 자신 분석 차단
-        if user.id == self.bot.user.id:
+        if not self._is_valid_days(days):
+            await interaction.response.send_message(
+                f"days는 1부터 {ANALYSIS_MAX_DAYS} 사이로 입력해 주세요.",
+                ephemeral=True,
+            )
+            return
+
+        if self.bot.user and user.id == self.bot.user.id:
             await interaction.response.send_message("일단 난 빌런아님 ㄹㅇㅋㅋ", ephemeral=True)
             return
 
         await interaction.response.send_message(
             f"빌런 분석을 위해 `{channel.name}` 채널에서 `{user.display_name}`님의 최근 {days}일간 메시지를 수집 중입니다...",
-            ephemeral=True
+            ephemeral=True,
         )
 
-        # 시간 범위 설정 (UTC 기준)
         end_time = datetime.utcnow().replace(tzinfo=timezone.utc)
         start_time = end_time - timedelta(days=days)
 
-        # 메시지 수집 (페이지네이션)
-        messages = []
-        async for msg in channel.history(limit=None, after=start_time, oldest_first=True):
-            if msg.author.id == user.id and msg.content:
-                messages.append(msg)
+        messages = await self._collect_user_messages(channel, user.id, start_time)
+        if messages is None:
+            await interaction.followup.send("채널 메시지를 읽을 권한이 없거나 조회 중 오류가 발생했어요.")
+            return
 
-        # 메시지 없음
         if not messages:
             await interaction.followup.send("형님, 이 친구 말을 잘 안하는데요?")
             return
 
-        # 정렬 및 실제 수집된 기간 확인
         messages.sort(key=lambda m: m.created_at)
         actual_start_date = messages[0].created_at.date()
         actual_end_date = messages[-1].created_at.date()
 
-        combined_text = "\n".join([msg.content for msg in messages])
+        combined_text = "\n".join(msg.content for msg in messages)
         message_count = len(messages)
 
-        # 디버그 출력
-        print("=" * 60)
-        print(f"[DEBUG] {user.display_name}의 메시지 {message_count}개 수집됨")
-        print(f"[DEBUG] 분석 요청 범위: {start_time.isoformat()} ~ {end_time.isoformat()}")
-        print(f"[DEBUG] 실제 수집 범위: {actual_start_date} ~ {actual_end_date}")
-        print(f"[DEBUG] 가장 오래된 메시지: ({messages[0].created_at}) \"{messages[0].content}\"")
-        print(f"[DEBUG] 가장 최근 메시지: ({messages[-1].created_at}) \"{messages[-1].content}\"")
-        print("=" * 60)
+        prompt = self._build_prompt(
+            channel_name=channel.name,
+            user_name=user.display_name,
+            start_time=start_time,
+            end_time=end_time,
+            actual_start_date=actual_start_date,
+            actual_end_date=actual_end_date,
+            combined_text=combined_text,
+        )
 
-        # 프롬프트 생성
-        prompt = f"""
+        result = await ask_gemini_question(prompt)
+
+        header = (
+            f"🧠 `{channel.name}` 채널에서 `{user.display_name}`님을 최근 {days}일간 분석한 결과입니다.\n"
+            f"💬 수집된 메시지 수: {message_count}개\n"
+            f"📅 실제 수집된 메시지 범위: {actual_start_date} ~ {actual_end_date}\n"
+        )
+        await interaction.followup.send(header)
+
+        for chunk in chunk_text(result, self.MAX_MESSAGE_CHUNK):
+            await interaction.followup.send(chunk)
+
+    @staticmethod
+    def _is_valid_days(days: int) -> bool:
+        return 1 <= days <= ANALYSIS_MAX_DAYS
+
+    @staticmethod
+    async def _collect_user_messages(
+        channel: discord.TextChannel,
+        user_id: int,
+        start_time: datetime,
+    ) -> List[discord.Message] | None:
+        messages: List[discord.Message] = []
+        try:
+            async for msg in channel.history(limit=None, after=start_time, oldest_first=True):
+                if msg.author.id == user_id and msg.content:
+                    messages.append(msg)
+        except (discord.Forbidden, discord.HTTPException):
+            logger.exception("Failed to collect channel messages for analysis")
+            return None
+        return messages
+
+    @staticmethod
+    def _build_prompt(
+        channel_name: str,
+        user_name: str,
+        start_time: datetime,
+        end_time: datetime,
+        actual_start_date,
+        actual_end_date,
+        combined_text: str,
+    ) -> str:
+        return f"""
 당신은 유쾌하지만 냉정한 Discord 채널 전담 '빌런 감별사'입니다.  
 사명은 단 하나: 채널을 교란시키는 언행의 소유자를 가려내는 것.
 
-아래는 `{channel.name}` 채널에서 `{user.display_name}` 사용자가 남긴 실제 메시지 모음입니다.  
+아래는 `{channel_name}` 채널에서 `{user_name}` 사용자가 남긴 실제 메시지 모음입니다.  
 (분석 요청 범위: {start_time.date()} ~ {end_time.date()} / 실제 수집된 메시지 범위: {actual_start_date} ~ {actual_end_date})
 
 당신은 이 기록을 바탕으로 다음의 항목을 명확하고 재치 있게 분석해야 합니다:
@@ -112,24 +166,3 @@ class UserAnalysisCog(commands.Cog):
 {combined_text}
 ---
 """
-
-        # Gemini 호출 및 결과 분할
-        try:
-            result = await ask_gemini_question(prompt)  # 비동기 호출로 수정
-        except Exception as e:
-            await interaction.followup.send(f"Gemini 응답 중 오류가 발생했어요: {e}")
-            return
-
-        # 메시지 분할 전송
-        header = (
-            f"🧠 `{channel.name}` 채널에서 `{user.display_name}`님을 최근 {days}일간 분석한 결과입니다.\n"
-            f"💬 수집된 메시지 수: {message_count}개\n"
-            f"📅 실제 수집된 메시지 범위: {actual_start_date} ~ {actual_end_date}\n"
-        )
-        await interaction.followup.send(header)
-
-        max_chunk = 1900
-        chunks = [result[i:i+max_chunk] for i in range(0, len(result), max_chunk)]
-
-        for chunk in chunks:
-            await interaction.followup.send(chunk)
